@@ -779,6 +779,39 @@ describe('parseNetLog', () => {
     assert.deepStrictEqual(exchanges.map(e => e.requestBody.toString()), ['first-body', 'second-body'])
     assert.deepStrictEqual(stats, { exchanges: 2, dropped: { failed: 0, unparsable: 0, internalRequests: 0 } })
   })
+
+  it('binds a stream body to only the first matching request', async (t) => {
+    // A crafted file can repeat one stream id across many header blocks; the
+    // body must be consumed by the first bound request or the serializer
+    // would copy it into every matching archive entry (size amplification
+    // past the decoded-byte budget)
+    const headers = [
+      ':method: POST',
+      ':authority: example.com',
+      ':scheme: https',
+      ':path: /upload'
+    ]
+    const sentBytes = h2SentBytes(3, Buffer.from('body'))
+    const urlRequest = (sourceId, url) => [
+      event(ST.URL_REQUEST, sourceId, ET.REQUEST_ALIVE, { url }),
+      event(ST.URL_REQUEST, sourceId, ET.URL_REQUEST_START_JOB, { method: 'POST', url }),
+      event(ST.HTTP_STREAM_JOB, sourceId + 1, ET.HTTP_STREAM_REQUEST_PROTO, { proto: 'h2' }),
+      event(ST.HTTP_STREAM_JOB, sourceId + 1, ET.HTTP2_SESSION_POOL_IMPORTED_SESSION_FROM_SOCKET, { source_dependency: { id: 922, type: ST.HTTP2_SESSION } }),
+      event(ST.URL_REQUEST, sourceId, ET.HTTP_STREAM_REQUEST_BOUND_TO_JOB, { source_dependency: { id: sourceId + 1, type: ST.HTTP_STREAM_JOB } }),
+      event(ST.URL_REQUEST, sourceId, ET.HTTP_TRANSACTION_HTTP2_SEND_REQUEST_HEADERS, { headers }),
+      event(ST.URL_REQUEST, sourceId, ET.HTTP_TRANSACTION_READ_RESPONSE_HEADERS, { headers: ['HTTP/1.1 204'] })
+    ]
+    const events = [
+      ...urlRequest(900, 'https://example.com/upload'),
+      ...urlRequest(910, 'https://example.com/upload'),
+      event(ST.SOCKET, 902, ET.SSL_SOCKET_BYTES_SENT, { byte_count: sentBytes.length, bytes: sentBytes.toString('base64') }),
+      event(ST.HTTP2_SESSION, 922, ET.HTTP2_SESSION_INITIALIZED, { protocol: 'h2', source_dependency: { id: 902, type: ST.SOCKET } }),
+      event(ST.HTTP2_SESSION, 922, ET.HTTP2_SESSION_SEND_HEADERS, { headers, stream_id: 3 }),
+      event(ST.HTTP2_SESSION, 922, ET.HTTP2_SESSION_SEND_HEADERS, { headers, stream_id: 3 })
+    ]
+    const { exchanges } = await parseNetLog(await writeNetlog(t, events))
+    assert.deepStrictEqual(exchanges.map(e => e.requestBody.toString()), ['body', ''])
+  })
 })
 
 describe('isInternalRequest', () => {

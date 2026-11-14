@@ -136,7 +136,8 @@ import { extractH2DataFrames } from './http2-frames.mjs'
  * An HTTP/2 session's logged request header blocks and DATA payloads.
  * @typedef {object} H2Session
  * @property {H2HeaderBlock[]} headerBlocks  chronological, minus consumed blocks
- * @property {Map<number, Buffer>} dataByStream
+ * @property {Map<number, Buffer>} dataByStream  DATA payloads per stream id,
+ *   each stream consumed when its body is bound
  */
 
 /** @typedef {{ requestLine: string|null, jobId: import('./keys.mjs').SourceKey|null, eventIndex: number, hop: HopCandidate }} H1CorrelationTask */
@@ -589,7 +590,14 @@ const correlateH2RequestBodies = (tasks, h2Sessions, jobs) => {
       const blockIndex = session.headerBlocks.findIndex(block => block.key === task.requestKey)
       if (blockIndex === -1) continue
       const [block] = session.headerBlocks.splice(blockIndex, 1)
-      task.hop.requestBody = session.dataByStream.get(block?.streamId ?? -1) ?? Buffer.alloc(0)
+      // A stream's body binds once: a stream id is unique per session, so a
+      // real capture never rebinds it. Consuming it here keeps a crafted file
+      // that repeats one stream id across many header blocks from handing the
+      // same body to every matching request — the serializer would copy it
+      // into each archive entry, multiplying the output past the caps.
+      const streamId = block?.streamId ?? -1
+      task.hop.requestBody = session.dataByStream.get(streamId) ?? Buffer.alloc(0)
+      if (streamId !== -1) session.dataByStream.delete(streamId)
       break
     }
   }
