@@ -377,6 +377,52 @@ describe('CSP replay-nonce seeding', () => {
     assert.deepStrictEqual(cspValues(archive.Requests['example.com']['https://example.com/'][0]), ["script-src 'nonce-abc'"])
   })
 
+  it('seeds a strict-dynamic policy whose unsafe-inline browsers ignore', () => {
+    // CSP3: 'strict-dynamic' makes browsers ignore 'unsafe-inline' (and every
+    // allowlist source), so the recorded policy blocks wpr's injected tag
+    // despite the keyword. A nonce is what admits a script there (CSP3
+    // honors nonces under 'strict-dynamic'), so seeding adds one; nothing is
+    // revoked — the 'unsafe-inline' was already ignored — and no
+    // script-src-attr / style-src mirror is added.
+    const archive = build([exchange([['Content-Security-Policy', "script-src 'strict-dynamic' 'unsafe-inline' https:"]])])
+    const [csp] = cspValues(archive.Requests['example.com']['https://example.com/'][0])
+    const match = /^script-src 'nonce-([A-Za-z0-9+/]+={0,2})' 'strict-dynamic' 'unsafe-inline' https:$/.exec(csp)
+    assert.notStrictEqual(match, null, csp)
+  })
+
+  it('leaves a strict-dynamic policy that already carries a nonce untouched', () => {
+    // The nonce admits wpr's tag under 'strict-dynamic'; seeding again would
+    // add nothing and must not disturb the policy
+    const archive = build([exchange([['Content-Security-Policy', "script-src 'strict-dynamic' 'unsafe-inline' 'nonce-abc'"]])])
+    assert.deepStrictEqual(cspValues(archive.Requests['example.com']['https://example.com/'][0]), ["script-src 'strict-dynamic' 'unsafe-inline' 'nonce-abc'"])
+  })
+
+  it('promotes a later CSP header so wpr reads a script directive', () => {
+    // wpr reads only the first CSP header (Go's Header.Get); when it carries
+    // no script-governing directive, its injected tag gets no nonce and the
+    // later header's policy blocks it. Header order is insignificant to
+    // browsers (their enforced policies are conjoined), so the
+    // script-bearing header is promoted to the front and seeded there.
+    const archive = build([exchange([
+      ['Content-Security-Policy', "img-src 'self'"],
+      ['Content-Security-Policy', "script-src 'self'"]
+    ])])
+    const [first, second] = cspValues(archive.Requests['example.com']['https://example.com/'][0])
+    const match = /^script-src 'nonce-([A-Za-z0-9+/]+={0,2})' 'self'$/.exec(first)
+    assert.notStrictEqual(match, null, first)
+    assert.strictEqual(second, "img-src 'self'")
+  })
+
+  it('promotes the script-bearing policy of a comma-split header', () => {
+    // The same gap within one header value: after the comma split, wpr reads
+    // the first entry, so the script-bearing policy must come first
+    const archive = build([exchange([['Content-Security-Policy', "img-src 'self', script-src 'self'"]])])
+    const [first, second] = cspValues(archive.Requests['example.com']['https://example.com/'][0])
+    const match = /^script-src 'nonce-([A-Za-z0-9+/]+={0,2})' 'self'$/.exec(first)
+    assert.notStrictEqual(match, null, first)
+    assert.strictEqual(second, "img-src 'self'")
+  })
+
   it('produces byte-identical archives for the same fixed replayNonce', () => {
     const exchanges = () => [exchange([
       ['Content-Security-Policy', "script-src 'self' 'unsafe-inline'; script-src-elem 'self' 'nonce-abc'"]

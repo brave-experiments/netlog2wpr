@@ -22,6 +22,15 @@ const isScriptDirectiveName = (name) => name === 'default-src' || name.startsWit
 /** @param {string} directive @returns {boolean} */
 const cspHasUnsafeInline = (directive) => cspDirectiveTokens(directive).some(token => token.toLowerCase() === "'unsafe-inline'")
 
+// CSP3: a 'strict-dynamic' in the directive makes browsers ignore
+// 'unsafe-inline' (and every allowlist source), so only a nonce or hash
+// admits an inline script — 'unsafe-inline' alone grants nothing there
+/** @param {string} directive @returns {boolean} */
+const cspHasStrictDynamic = (directive) => cspDirectiveTokens(directive).some(token => token.toLowerCase() === "'strict-dynamic'")
+
+/** @param {string} directive @returns {boolean} */
+const admitsInlineScripts = (directive) => cspHasUnsafeInline(directive) && !cspHasStrictDynamic(directive)
+
 /** @param {string} directive @returns {boolean} */
 const cspHasSha = (directive) => cspDirectiveTokens(directive).some(token => /^'sha(?:256|384|512)-/i.test(token))
 
@@ -105,7 +114,16 @@ const parseCspPolicies = (value) => value.replace(/\s+/g, ' ').split(',')
  * keeps its original bytes unless another enforced policy blocks arbitrary
  * inline scripts anyway (the conjunction already blocked them at record
  * time, and wpr then needs the nonce from the first script-governing
- * directive to tag its script).
+ * directive to tag its script). A 'strict-dynamic' directive is seeded even
+ * when it carries 'unsafe-inline': under CSP3 browsers ignore that keyword
+ * there, so the recorded policy blocks the tag, and the nonce is what admits
+ * it — seeding revokes nothing and no mirrors are added.
+ *
+ * When no earlier policy carries a script-governing directive, the first
+ * policy that does is promoted to the front of the rebuilt CSP header
+ * entries (header order is insignificant to browsers, whose enforced
+ * policies are conjoined, while wpr reads only the first header), so wpr
+ * finds a nonce source for its tag.
  *
  * Seeding is permission-neutral for inline event handlers too: an attribute
  * directive admitting handlers is never seeded (the nonce would revoke its
@@ -141,20 +159,36 @@ const seedCspReplayNonce = (exchange, nonce) => {
   // Mutable directive lists per enforced header, one per comma-separated policy
   const cspPolicies = cspIndexes.map(index => parseCspPolicies(/** @type {string} */ (exchange.responseEntries[index]?.[1])))
 
+  // Comma-separated policies across all enforced headers, in order: each
+  // becomes its own header entry at rebuild
+  /** @type {{ directives: string[], entry: HeaderEntry }[]} */
+  const policies = cspPolicies.flatMap((headerPolicies, cspIndex) => {
+    const entry = /** @type {HeaderEntry} */ (exchange.responseEntries[/** @type {number} */ (cspIndexes[cspIndex])])
+    return headerPolicies.map(directives => ({ directives, entry }))
+  })
+
   // wpr reads only the first CSP header (Go's Header.Get): its nonce source
-  // and rewrite target come from the first policy's wpr directive
+  // and rewrite target come from the first entry's wpr directive. When no
+  // earlier policy carries a script-governing directive, the first one that
+  // does takes over — and its header entry is promoted to the front of the
+  // rebuilt entries below, so wpr reads it (header order is insignificant
+  // to browsers, whose enforced policies are conjoined).
   /** @type {(directives: string[]) => number} */
   const wprDirectiveIndex = (directives) => {
     const script = directives.findIndex(directive => cspDirectiveName(directive).startsWith('script-src'))
     if (script !== -1) return script
     return directives.map(cspDirectiveName).lastIndexOf('default-src')
   }
-  const firstPolicy = cspPolicies[0]?.[0]
   /** @type {{ directives: string[], index: number }|null} */
   let tagSource = null
-  if (firstPolicy !== undefined) {
-    const index = wprDirectiveIndex(firstPolicy)
-    if (index !== -1) tagSource = { directives: firstPolicy, index }
+  let tagSourcePolicyIndex = -1 // index into the flattened policies list
+  for (const [policyIndex, policy] of policies.entries()) {
+    const index = wprDirectiveIndex(policy.directives)
+    if (index !== -1) {
+      tagSource = { directives: policy.directives, index }
+      tagSourcePolicyIndex = policyIndex
+      break
+    }
   }
 
   // The directive governing <script> elements: the script-src-elem →
@@ -180,7 +214,7 @@ const seedCspReplayNonce = (exchange, nonce) => {
   /** @type {(directives: string[], index: number) => boolean} */
   const admitsTag = (directives, index) => {
     const directive = /** @type {string} */ (directives[index])
-    if (hasOurNonce(directive) || cspHasUnsafeInline(directive)) return true
+    if (hasOurNonce(directive) || admitsInlineScripts(directive)) return true
     return isTagSource(directives, index) && (cspHasNonce(directive) || cspHasSha(directive))
   }
 
@@ -198,9 +232,12 @@ const seedCspReplayNonce = (exchange, nonce) => {
     // permissions survive: script-src-attr for event handlers and style-src
     // for inline styles. script-src-elem never governs either, so seeding it
     // adds no mirror; a directive that already carried a nonce or a hash had
-    // its 'unsafe-inline' ignored before seeding too.
+    // its 'unsafe-inline' ignored before seeding too, and so did one with
+    // 'strict-dynamic' (CSP3 ignores 'unsafe-inline' there), so neither
+    // revokes anything.
     const revokesUnsafeInline = cspHasUnsafeInline(original.join(' ')) &&
-      !cspHasNonce(original.join(' ')) && !cspHasSha(original.join(' '))
+      !cspHasNonce(original.join(' ')) && !cspHasSha(original.join(' ')) &&
+      !cspHasStrictDynamic(original.join(' '))
     if (!revokesUnsafeInline) return
     const name = /** @type {string} */ (original[0]).toLowerCase()
     const names = directives.map(cspDirectiveName)
@@ -233,12 +270,15 @@ const seedCspReplayNonce = (exchange, nonce) => {
     // Every policy's element directive must admit the seeded tag: a foreign
     // nonce would block it (ours coexists with the site's), a blocking one
     // would be relaxed by wpr. Directives already admitting arbitrary inline
-    // scripts are left alone — seeding would revoke that permission.
+    // scripts are left alone — seeding would revoke that permission. A
+    // 'strict-dynamic' directive is seeded: browsers ignore its
+    // 'unsafe-inline', so the nonce is what admits the tag (CSP3 honors
+    // nonces under 'strict-dynamic'), and nothing is revoked.
     cspPolicies.forEach(policies => policies.forEach(directives => {
       const index = elementDirectiveIndex(directives)
       if (index === -1) return
       const directive = /** @type {string} */ (directives[index])
-      if (hasOurNonce(directive) || cspHasUnsafeInline(directive)) return
+      if (hasOurNonce(directive) || admitsInlineScripts(directive)) return
       seed({ directives, index })
     }))
   }
@@ -261,7 +301,7 @@ const seedCspReplayNonce = (exchange, nonce) => {
     const index = wprDirectiveIndex(directives)
     if (index === -1) return
     const directive = /** @type {string} */ (directives[index])
-    if (cspHasNonce(directive) || cspHasSha(directive) || cspHasUnsafeInline(directive)) return
+    if (cspHasNonce(directive) || cspHasSha(directive) || admitsInlineScripts(directive)) return
     seed({ directives, index })
   }))
 
@@ -293,12 +333,40 @@ const seedCspReplayNonce = (exchange, nonce) => {
 
   // Rebuild the entries: each comma-separated policy becomes its own header
   // entry, all other entries (and their tuples) are reused as-is. Untouched
-  // values come back byte-identical.
-  const rebuilt = exchange.responseEntries.flatMap((entry, index) => {
+  // values come back byte-identical. When the tag source is not the first
+  // policy, its group is promoted ahead of the first CSP entry: header order
+  // is insignificant to browsers (their enforced policies are conjoined),
+  // but wpr reads only the first CSP header.
+  const policyGroups = policies.map(policy =>
+    /** @type {HeaderEntry} */ ([policy.entry[0], policy.directives.join(';')]))
+  // First flattened policy index of each enforced header entry
+  /** @type {number[]} */
+  const policyOffsets = []
+  let policyCursor = 0
+  for (const headerPolicies of cspPolicies) {
+    policyOffsets.push(policyCursor)
+    policyCursor += headerPolicies.length
+  }
+  const promotedIndex = tagSourcePolicyIndex > 0 ? tagSourcePolicyIndex : -1
+  /** @type {HeaderEntry[]} */
+  const rebuilt = []
+  exchange.responseEntries.forEach((entry, index) => {
     const cspIndex = cspIndexes.indexOf(index)
-    if (cspIndex === -1) return [entry]
-    const policies = /** @type {string[][]} */ (cspPolicies[cspIndex])
-    return policies.map(directives => /** @type {HeaderEntry} */ ([entry[0], directives.join(';')]))
+    if (cspIndex === -1) {
+      rebuilt.push(entry)
+      return
+    }
+    if (cspIndex === 0 && promotedIndex !== -1) {
+      rebuilt.push(/** @type {HeaderEntry} */ (policyGroups[promotedIndex]))
+    }
+    const start = /** @type {number} */ (policyOffsets[cspIndex])
+    const end = cspIndex + 1 < policyOffsets.length
+      ? /** @type {number} */ (policyOffsets[cspIndex + 1])
+      : policyCursor
+    for (let group = start; group < end; group++) {
+      if (group === promotedIndex) continue
+      rebuilt.push(/** @type {HeaderEntry} */ (policyGroups[group]))
+    }
   })
   const unchanged = rebuilt.length === exchange.responseEntries.length && rebuilt.every((entry, index) => {
     const original = exchange.responseEntries[index]
