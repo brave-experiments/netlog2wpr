@@ -1,8 +1,13 @@
 {
   "name": "netlog2wpr",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brave-experiments/netlog2wpr.git"
+  },
   "exports": {
     ".": "./src/index.mjs"
   },
