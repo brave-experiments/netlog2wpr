@@ -731,6 +731,53 @@ describe('parseNetLog', () => {
     })
   })
 
+  it('rejects a non-string entry in a request header list', async (t) => {
+    // A wrong-shaped headers parameter must raise a NetLogError, not a
+    // TypeError from the header parser's line.startsWith
+    const url = 'http://example.com/bad-headers'
+    const events = [
+      event(ST.URL_REQUEST, 820, ET.REQUEST_ALIVE, { url }, PHASE.PHASE_BEGIN),
+      event(ST.URL_REQUEST, 820, ET.URL_REQUEST_START_JOB, { method: 'GET', url }, PHASE.PHASE_BEGIN),
+      event(ST.URL_REQUEST, 820, ET.HTTP_TRANSACTION_SEND_REQUEST_HEADERS, { line: 'GET /bad-headers HTTP/1.1\r\n', headers: ['Host: example.com', 42] })
+    ]
+    const netlogPath = await writeNetlog(t, events)
+    await assert.rejects(parseNetLog(netlogPath), {
+      name: 'NetLogError',
+      code: 'INVALID',
+      message: 'unexpected non-string-array headers parameter on a HTTP_TRANSACTION_SEND_REQUEST_HEADERS event'
+    })
+  })
+
+  it('rejects a non-string entry in a response header list', async (t) => {
+    const url = 'http://example.com/bad-response'
+    const events = [
+      event(ST.URL_REQUEST, 830, ET.REQUEST_ALIVE, { url }, PHASE.PHASE_BEGIN),
+      event(ST.URL_REQUEST, 830, ET.URL_REQUEST_START_JOB, { method: 'GET', url }, PHASE.PHASE_BEGIN),
+      event(ST.URL_REQUEST, 830, ET.HTTP_TRANSACTION_SEND_REQUEST_HEADERS, { line: 'GET /bad-response HTTP/1.1\r\n', headers: ['Host: example.com'] }),
+      event(ST.URL_REQUEST, 830, ET.HTTP_TRANSACTION_READ_RESPONSE_HEADERS, { headers: ['HTTP/1.1 200 OK', null] })
+    ]
+    const netlogPath = await writeNetlog(t, events)
+    await assert.rejects(parseNetLog(netlogPath), {
+      name: 'NetLogError',
+      code: 'INVALID',
+      message: 'unexpected non-string-array headers parameter on a HTTP_TRANSACTION_READ_RESPONSE_HEADERS event'
+    })
+  })
+
+  it('rejects a non-string network_isolation_key on a START_JOB event', async (t) => {
+    const url = 'http://example.com/bad-key'
+    const events = [
+      event(ST.URL_REQUEST, 840, ET.REQUEST_ALIVE, { url }, PHASE.PHASE_BEGIN),
+      event(ST.URL_REQUEST, 840, ET.URL_REQUEST_START_JOB, { method: 'GET', url, network_isolation_key: 42 }, PHASE.PHASE_BEGIN)
+    ]
+    const netlogPath = await writeNetlog(t, events)
+    await assert.rejects(parseNetLog(netlogPath), {
+      name: 'NetLogError',
+      code: 'INVALID',
+      message: 'unexpected non-string network_isolation_key on a URL_REQUEST_START_JOB event'
+    })
+  })
+
   it('resolves h2 bodies for multiple sessions bound to the same socket', async (t) => {
     // DATA frames live on the connection, not on a session object, so the
     // frame extraction is shared by every session claiming the socket (first

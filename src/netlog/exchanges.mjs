@@ -227,6 +227,23 @@ export const parseNetLog = async (netlogPath, { maxNetlogBytes, onWarning, dropI
     return chunk
   }
 
+  // Header lists logged on transaction events. A crafted file can put any
+  // JSON value in the headers parameter; the parsers below iterate the lines
+  // and call string methods on them, so a wrong shape must raise a
+  // NetLogError here instead of a TypeError downstream (callers classify
+  // parser failures by err.code).
+  /**
+   * @param {unknown} headers
+   * @param {string} eventType name of the event the list belongs to
+   * @returns {string[]}
+   */
+  const headerListOf = (headers, eventType) => {
+    if (!Array.isArray(headers) || !headers.every(line => typeof line === 'string')) {
+      throw new NetLogError(`unexpected non-string-array headers parameter on a ${eventType} event`, { code: 'INVALID' })
+    }
+    return headers
+  }
+
   // Events grouped by source, preserving chronological order. Source ids are
   // partitioned per source type, so maps are keyed by type:id pairs. Each
   // event's position in netlog.events is recorded alongside it: a per-source
@@ -399,7 +416,7 @@ export const parseNetLog = async (netlogPath, { maxNetlogBytes, onWarning, dropI
           // Stripped once here; the request-line regex, body recovery and the
           // archive serializer all use the line without its CRLF
           requestLine: typeof params.line === 'string' ? stripLineEnding(params.line) : null,
-          requestHeaders: /** @type {string[]} */ (params.headers ?? []),
+          requestHeaders: params.headers === undefined ? [] : headerListOf(params.headers, event.type === ET.sendHeaders ? 'HTTP_TRANSACTION_SEND_REQUEST_HEADERS' : 'HTTP_TRANSACTION_HTTP2_SEND_REQUEST_HEADERS'),
           responseHeaders: null,
           rawChunks: [],
           filteredChunks: [],
@@ -426,7 +443,7 @@ export const parseNetLog = async (netlogPath, { maxNetlogBytes, onWarning, dropI
       } else if (event.type === ET.readResponseHeaders && hop !== null) {
         // A missing header list is not a valid response; only a present list
         // counts as a logged response
-        if (Array.isArray(params.headers)) hop.responseHeaders = params.headers
+        if (params.headers !== undefined) hop.responseHeaders = headerListOf(params.headers, 'HTTP_TRANSACTION_READ_RESPONSE_HEADERS')
       } else if (event.type === ET.jobBytesRead && hop !== null && event.params?.bytes !== undefined) {
         // Raw (still content-encoded) bytes; only logged when a content filter ran
         hop.rawChunks.push(decodeBytes(event.params.bytes, 'URL_REQUEST_JOB_BYTES_READ'))
@@ -562,6 +579,22 @@ export const parseNetLog = async (netlogPath, { maxNetlogBytes, onWarning, dropI
  */
 export const isInternalRequest = (startJobParams) => {
   const params = startJobParams ?? {}
+  // A crafted file can put any JSON value in these fields; the string
+  // methods below must not surface as TypeErrors (callers classify parser
+  // failures by err.code)
+  /**
+   * @param {unknown} value
+   * @param {string} field
+   */
+  const assertString = (value, field) => {
+    if (value !== undefined && typeof value !== 'string') {
+      throw new NetLogError(`unexpected non-string ${field} on a URL_REQUEST_START_JOB event`, { code: 'INVALID' })
+    }
+  }
+  assertString(params.network_isolation_key, 'network_isolation_key')
+  assertString(params.network_anonymization_key, 'network_anonymization_key')
+  assertString(params.initiator, 'initiator')
+  assertString(params.request_type, 'request_type')
   // Both keys are checked independently: either one without an accountable
   // frame site makes the request internal
   if ((params.network_isolation_key ?? '').startsWith('null') || (params.network_anonymization_key ?? '').startsWith('null')) return true
