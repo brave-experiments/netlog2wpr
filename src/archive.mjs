@@ -18,6 +18,7 @@
 
 import crypto from 'node:crypto'
 
+import { NetLogError } from './netlog/errors.mjs'
 import { seedCspReplayNonce } from './csp.mjs'
 
 /** @typedef {import('./netlog/exchanges.mjs').Exchange} Exchange */
@@ -39,6 +40,11 @@ import { seedCspReplayNonce } from './csp.mjs'
  */
 
 /** @typedef {{ SerializedRequest: string, SerializedResponse: string, LastServedSessionId: number }} WprMessage */
+
+// Base64 as documented for replayNonce (the nonce is spliced into a CSP
+// directive as 'nonce-<value>', so anything outside the alphabet could
+// weaken the recorded policy at replay)
+const REPLAY_NONCE_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/
 
 // Go's net/http/status.go wording, which wpr replays
 /** @type {Record<number, string>} */
@@ -365,6 +371,9 @@ const isTruncatedHttp1Body = (exchange) =>
  * @returns {WprArchive}
  */
 export const archiveFromExchanges = (exchanges, negotiatedProtocols, { injectedScripts = {}, deterministicTimeSeedMs = 0, metadata = '', replayNonce = crypto.randomBytes(16).toString('base64'), onWarning } = {}) => {
+  if (typeof replayNonce !== 'string' || !REPLAY_NONCE_PATTERN.test(replayNonce)) {
+    throw new NetLogError('replayNonce must be a base64 string (A-Za-z0-9+/_- with optional padding)', { code: 'INVALID' })
+  }
   const seeded = exchanges.map(exchange => ({ ...exchange, responseEntries: seedCspReplayNonce(exchange, replayNonce) }))
   /** @type {Map<string, Map<string, WprMessage[]>>} */
   const requests = new Map() // authority -> Map(url -> [message])

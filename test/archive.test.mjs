@@ -759,4 +759,16 @@ describe('netlog to WprGo archive conversion', () => {
     assert.deepStrictEqual(archive.Certs, {})
     assert.deepStrictEqual(archive.Requests, {})
   })
+
+  it('rejects a replayNonce outside the base64 alphabet', () => {
+    // The nonce is spliced into a CSP directive as 'nonce-<value>'; an
+    // unvalidated value like "x' 'unsafe-inline" would weaken the recorded
+    // policy at replay
+    for (const replayNonce of ["x' 'unsafe-inline", '', 'a b', '=abc', 'AA==BB']) {
+      assert.throws(() => archiveFromExchanges([], new Map(), { replayNonce }), { name: 'NetLogError', code: 'INVALID' })
+    }
+    for (const replayNonce of ['AAAAAAAAAAAAAAAAAAAAAA==', 'YQ', 'YQ==', '_-9A-Zaz+/']) {
+      assert.doesNotThrow(() => archiveFromExchanges([], new Map(), { replayNonce }))
+    }
+  })
 })
