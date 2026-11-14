@@ -116,8 +116,8 @@ const parseCspPolicies = (value) => value.replace(/\s+/g, ' ').split(',')
  * time, and wpr then needs the nonce from the first script-governing
  * directive to tag its script). A 'strict-dynamic' directive is seeded even
  * when it carries 'unsafe-inline': under CSP3 browsers ignore that keyword
- * there, so the recorded policy blocks the tag, and the nonce is what admits
- * it — seeding revokes nothing and no mirrors are added.
+ * for scripts there, so the recorded policy blocks the tag, and the nonce is
+ * what admits it.
  *
  * When no earlier policy carries a script-governing directive, the first
  * policy that does is promoted to the front of the rebuilt CSP header
@@ -130,9 +130,14 @@ const parseCspPolicies = (value) => value.replace(/\s+/g, ' ').split(',')
  * 'unsafe-inline'), and a seeded directive that served as the handlers'
  * fallback (script-src, or default-src where the policy has no script-src)
  * has its original form copied verbatim into an explicit script-src-attr
- * appended to the policy. The same mirroring keeps a seeded default-src from
- * revoking recorded inline-style permissions through an explicit style-src.
- * The copies are a deliberate byte divergence from wpr record, which
+ * appended to the policy — except when the fallback carries 'strict-dynamic':
+ * CSP3 makes browsers ignore 'unsafe-inline' for scripts there, so handlers
+ * were already blocked at record time and the copy would only re-grant them.
+ * The same mirroring keeps a seeded default-src from revoking recorded
+ * inline-style permissions through an explicit style-src, whatever
+ * 'strict-dynamic' does to scripts: that keyword is script-only, so inline
+ * styles were allowed at record time and a seeded nonce must not revoke
+ * them. The copies are a deliberate byte divergence from wpr record, which
  * archives neither. Since the appended attribute directive would otherwise
  * become wpr's nonce source without carrying a nonce, the element-governing
  * directive is moved ahead of it (or an explicit seeded script-src is
@@ -229,24 +234,26 @@ const seedCspReplayNonce = (exchange, nonce) => {
     // The added nonce makes browsers ignore 'unsafe-inline' in the seeded
     // directive, revoking the inline permissions it granted as a fallback.
     // Mirror the original into explicit sub-directives so the recorded
-    // permissions survive: script-src-attr for event handlers and style-src
-    // for inline styles. script-src-elem never governs either, so seeding it
-    // adds no mirror; a directive that already carried a nonce or a hash had
-    // its 'unsafe-inline' ignored before seeding too, and so did one with
-    // 'strict-dynamic' (CSP3 ignores 'unsafe-inline' there), so neither
-    // revokes anything.
+    // permissions survive: style-src for inline styles and script-src-attr
+    // for event handlers. script-src-elem never governs either, so seeding
+    // it adds no mirror; a directive that already carried a nonce or a hash
+    // had its 'unsafe-inline' ignored before seeding too, so it revokes
+    // nothing. 'strict-dynamic' only makes browsers ignore 'unsafe-inline'
+    // for scripts: handlers were already blocked at record time (no
+    // script-src-attr mirror), but inline styles were not, so the style-src
+    // mirror is still needed for a seeded default-src.
     const revokesUnsafeInline = cspHasUnsafeInline(original.join(' ')) &&
-      !cspHasNonce(original.join(' ')) && !cspHasSha(original.join(' ')) &&
-      !cspHasStrictDynamic(original.join(' '))
+      !cspHasNonce(original.join(' ')) && !cspHasSha(original.join(' '))
+    const revokesInlineHandlers = revokesUnsafeInline && !cspHasStrictDynamic(original.join(' '))
     if (!revokesUnsafeInline) return
     const name = /** @type {string} */ (original[0]).toLowerCase()
     const names = directives.map(cspDirectiveName)
     if (name === 'default-src') {
       if (!names.includes('style-src')) directives.push(`style-src ${original.slice(1).join(' ')}`)
-      if (!names.includes('script-src') && !names.includes('script-src-attr')) {
+      if (revokesInlineHandlers && !names.includes('script-src') && !names.includes('script-src-attr')) {
         directives.push(`script-src-attr ${original.slice(1).join(' ')}`)
       }
-    } else if (name === 'script-src' && !names.includes('script-src-attr')) {
+    } else if (name === 'script-src' && revokesInlineHandlers && !names.includes('script-src-attr')) {
       directives.push(`script-src-attr ${original.slice(1).join(' ')}`)
     }
   }

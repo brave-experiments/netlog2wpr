@@ -378,16 +378,30 @@ describe('CSP replay-nonce seeding', () => {
   })
 
   it('seeds a strict-dynamic policy whose unsafe-inline browsers ignore', () => {
-    // CSP3: 'strict-dynamic' makes browsers ignore 'unsafe-inline' (and every
-    // allowlist source), so the recorded policy blocks wpr's injected tag
-    // despite the keyword. A nonce is what admits a script there (CSP3
-    // honors nonces under 'strict-dynamic'), so seeding adds one; nothing is
-    // revoked — the 'unsafe-inline' was already ignored — and no
-    // script-src-attr / style-src mirror is added.
+    // CSP3: 'strict-dynamic' makes browsers ignore 'unsafe-inline' for
+    // scripts, so the recorded policy blocks wpr's injected tag despite the
+    // keyword. A nonce is what admits a script there (CSP3 honors nonces
+    // under 'strict-dynamic'), so seeding adds one; no script-src-attr
+    // mirror is added because handlers were already blocked under
+    // 'strict-dynamic' (and a script-src never governs styles).
     const archive = build([exchange([['Content-Security-Policy', "script-src 'strict-dynamic' 'unsafe-inline' https:"]])])
     const [csp] = cspValues(archive.Requests['example.com']['https://example.com/'][0])
     const match = /^script-src 'nonce-([A-Za-z0-9+/]+={0,2})' 'strict-dynamic' 'unsafe-inline' https:$/.exec(csp)
     assert.notStrictEqual(match, null, csp)
+  })
+
+  it('mirrors a seeded strict-dynamic default-src into an explicit style-src', () => {
+    // 'strict-dynamic' cancels 'unsafe-inline' for scripts only: inline
+    // styles were allowed at record time, and the seeded nonce must not
+    // revoke that, so the style-src copy is still added. Handlers were
+    // already blocked under 'strict-dynamic', so no script-src-attr copy.
+    const archive = build([exchange([['Content-Security-Policy', "default-src 'strict-dynamic' 'unsafe-inline'"]])])
+    const [csp] = cspValues(archive.Requests['example.com']['https://example.com/'][0])
+    const nonce = /'nonce-([^']+)'/.exec(csp)[1]
+    assert.deepStrictEqual(csp.split(';').map(directive => directive.trim()), [
+      `default-src 'nonce-${nonce}' 'strict-dynamic' 'unsafe-inline'`,
+      "style-src 'strict-dynamic' 'unsafe-inline'"
+    ])
   })
 
   it('leaves a strict-dynamic policy that already carries a nonce untouched', () => {
