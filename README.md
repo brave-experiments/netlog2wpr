@@ -27,13 +27,12 @@ Requires Node >= 24. ESM only.
 - `NetLogError`: error class thrown for parser/serializer failures; carries a
   `code` (`INVALID`, `CAP_REACHED`, `TRUNCATED`, `MISSING_CONSTANTS`,
   `CHUNKED_UPLOAD`, `NO_REQUESTS`, `ALL_DROPPED`).
-- `DEFAULT_NETLOG_CAP_MB`: default `maxNetlogBytes` (300).
 
 ```js
 import { netlogToWprArchive } from 'netlog2wpr'
 
 const { archive, stats, warnings } = await netlogToWprArchive('netlog.ndjson', {
-  maxNetlogBytes: 300 * 1024 * 1024,
+  maxNetlogBytes: 400 * 1024 * 1024,  // defaults to 300MB if unspecified
   metadata: JSON.stringify({ originalUrl: 'https://example.com/', recordedAt: new Date().toISOString() })
 })
 ```
